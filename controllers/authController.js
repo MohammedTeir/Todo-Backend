@@ -1,12 +1,12 @@
 const jwt = require('jsonwebtoken');
 const bcryptjs = require('bcryptjs');
 const User = require('../models/User');
+const {userValidator} = require('../validators');
 const Todo = require('../models/Todo');
 const dotenv = require('dotenv');
 const revoked = require('../utils/revokeToken');
 dotenv.config() // load environment variables from .env file
-
-
+const createError = require('http-errors');
 
 const secret = process.env.JWT_SECRET;
 const saltRounds = process.env.SALT_ROUNDS;
@@ -18,13 +18,18 @@ const register = async (req, res, next) => {
   try {
     const { name ,username, email, password } = req.body;
 
+
+    const validation = userValidator.registerSchema.validate({ name, username, email, password });
+    if (validation.error) {
+      const error = createError(400, validation.error.details[0].message.replace(/"/g, ''));
+      return next(error);
+    }
+
     // Check if user with same email or username already exists
     const existingUser = await User.findOne({ $or: [{ email }, { username }] });
     if (existingUser) {
-       res.status(400).json({
-        status: 'failed',
-        message: 'User already exists'
-      });
+      const error = createError(400, 'User already exists');
+      return next(error);
     }
 
     // Hash password and create new user
@@ -39,7 +44,7 @@ const register = async (req, res, next) => {
 
     // Create JWT token
     const accessToken = jwt.sign({ id: user._id }, secret, { expiresIn: '1h' });
-    res.status(201).json({
+    return res.status(201).json({
       status: 'success',
       message: 'User registered',
       _id: user._id,
@@ -48,7 +53,7 @@ const register = async (req, res, next) => {
       }
     });
   } catch (error) {
-    next(error);
+    return next(error);
   }
 };
 
@@ -56,29 +61,35 @@ const register = async (req, res, next) => {
 // Function to login an existing user
 const login = async (req, res, next) => {
   try {
-    const { email, password } = req.body;
+    const { email, password , username } = req.body;
+
+    
+
+    const validation = userValidator.loginSchema.validate({ email, password, username });
+    if (validation.error) {
+      const error = createError(400, validation.error.details[0].message.replace(/"/g, ''));
+      return next(error);
+    }
 
     // Check if user with provided email exists
-    const user = await User.findOne({ email });
+    const user = await User.findOne({ $or: [{ email }, { username }] });
     if (!user) {
-       res.status(401).json({
-        status: 'failed',
-        message: 'Invalid email or password'
-      });
+      const error = createError(401, 'Invalid email, username, or password');
+      return next(error);
     }
 
     // Check if provided password matches user's hashed password
     const isValidPassword = await bcryptjs.compare(password, user.password);
     if (!isValidPassword) {
-       res.status(401).json({
-        status: 'failed',
-        message: 'Invalid email or password'
-      });
+
+      const error = createError(401, 'Invalid email or password');
+      return next(error);
+
     }
 
     // Create JWT token
     const accessToken = jwt.sign({ id: user._id }, secret, { expiresIn: '1h' });
-    res.status(200).json({
+    return res.status(200).json({
       status: 'success',
       message: 'Login successful',
       _id: user._id,
@@ -87,7 +98,7 @@ const login = async (req, res, next) => {
       }
     });
   } catch (error) {
-    next(error);
+    return next(error);
   }
 };
 
@@ -97,18 +108,16 @@ const getMe = async (req, res, next) => {
   try {
     const user = await User.findById(req.user.id).select(['-password','-_id']);
     if (!user) {
-       res.status(404).json({
-        status: 'failed',
-        message: 'User not found'
-      });
+      const error = createError(404, 'User not found');
+      return next(error);
     }
-    res.status(200).json({
+    return res.status(200).json({
       status: 'success',
       message: 'User data retrieved successfully',
       data: user
     });
   } catch (error) {
-    next(error);
+    return next(error);
   }
 };
 
@@ -118,38 +127,54 @@ const updateProfile = async (req, res, next) => {
   try {
     const { username, name, age , gender , avatar , email, password } = req.body;
 
+    const validation = userValidator.updateSchema.validate({
+      username,
+      name,
+      age,
+      gender,
+      avatar,
+      email,
+      password,
+    });
+    if (validation.error) {
+      const error = createError(400, validation.error.details[0].message.replace(/"/g, ''));
+      return next(error);
+    }
+
     // Check if user with same email or username already exists
     const existingUser = await User.findOne({ $or: [{ email }, { username }], _id: { $ne: req.user.id } });
     if (existingUser) {
-       res.status(400).json({
-        status: 'failed',
-        message: 'Username or Email already exists'
-      });
+      const error = createError(400, 'Username or Email already exists');
+       return next(error);
     }
+
+    
 
     // Update user with new details
     const user = await User.findById(req.user.id);
-    user.username = username || user.username;
-    user.email = email || user.email;
-    user.name = name || user.name;
-    user.age = age || user.age;
-    user.gender = gender || user.gender;
-    user.avatar = avatar || user.avatar;
+    const update = {
+      username: username || user.username,
+      email: email || user.email,
+      name: name || user.name,
+      age: age || user.age,
+      gender: gender || user.gender,
+      avatar: avatar || user.avatar
+    };
 
     if (password) {
       const hashedPassword = await bcryptjs.hash(password, salt);
-      user.password = hashedPassword;
+      update.password = hashedPassword;
     }
 
-    await user.save();
+    const updatedUser = await User.findByIdAndUpdate(user._id, update, { new: true });
 
-    res.status(200).json({
-      _id: user._id,
+    return res.status(200).json({
       status: 'success',
-      message: 'User updated successfully'
+      message: 'User updated successfully',
+      data:updatedUser
     });
   } catch (error) {
-    next(error);
+    return next(error);
   }
 };
 
@@ -159,8 +184,6 @@ const deleteUser = async (req, res, next) => {
   try {
     const userId = req.user.id;
 
-    let responseSent = false;
-
     // Delete all todos created by the user
     await Todo.deleteMany({ createdBy: userId });
 
@@ -168,15 +191,13 @@ const deleteUser = async (req, res, next) => {
     const deletedUser = await User.findOneAndDelete({ _id: userId });
 
     if (!deletedUser) {
-      res.status(404).json({ message: 'User not found', status: 'failed' });
-      responseSent = true;
+      const error = createError(404, 'User not found');
+      return next(error);
     }
-
-    if (!responseSent) {
-      res.status(200).json({ message: 'User and associated data deleted successfully', status: 'success' , _id: userId});
-    }
+    revokeToken(req.token);
+    return res.status(200).json({ message: 'User deleted successfully', status: 'success' , _id: userId});
   } catch (error) {
-    next(error);
+    return next(error);
   }
 };
 
@@ -186,17 +207,16 @@ const deleteUser = async (req, res, next) => {
   // Function to log out user
   const logout = async (req, res, next) => {
     try {
-      // Clear JWT token from client-side
 
 
       res.clearCookie('token');
 
       revoked(req.token);
 
-      res.status(200).json({ message: 'Logout successful', status: 'success' });
+      return res.status(200).json({ message: 'Logout successful', status: 'success' });
       
     } catch (error) {
-      next(error);
+      return next(error);
     }
   };
 
